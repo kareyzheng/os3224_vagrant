@@ -266,32 +266,87 @@ void
 scheduler(void)
 {
   struct proc *p;
+  int foundproc = 1;
 
   for(;;){
     // Enable interrupts on this processor.
     sti();
 
-    // Loop over process table looking for process to run.
+    if (!foundproc) hlt();
+
+    foundproc = 0;
+
+    #ifdef DEFAULT
     acquire(&ptable.lock);
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
-
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
+      if(p->state != RUNNABLE) continue;
+      
+      runTime = ticks;
+      findTime = ticks;
+      
+      foundproc = 1;
       proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
-      swtch(&cpu->scheduler, proc->context);
-      switchkvm();
-
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
+      
+      while (findtime - runTime <= QUANTA){
+          switchuvm(p);
+          p->state = RUNNING;
+          swtch(&cpu->scheduler, proc->context);
+          switchkvm();
+          if(proc->state != RUNNABLE) break;
+      }
       proc = 0;
     }
     release(&ptable.lock);
+    
+    #elif FRR
+    acquire(&ptable.lock);
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE) continue;
+        
+      runTime = ticks;
+      findTime = ticks;
+      
+      foundproc = 1;
+      proc = p;
+      
+      while (findtime - runTime <= QUANTA){
+          switchuvm(p);
+          p->state = RUNNING;
+          swtch(&cpu->scheduler, proc->context);
+          switchkvm();
+          if(proc->state != RUNNABLE) break;
+      }
+      proc = 0;
+    }
+    release(&ptable.lock);
+      
+    #elif FCFS
+    acquire(&ptable.lock);
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE) continue;
+      
+      runTime = ticks;
+      findTime = ticks;
 
+      foundproc = 1;
+      proc = p;
+      
+      while (findtime - runningtime <= QUANTA){
+          switchuvm(p);
+          p->state = RUNNING;
+          swtch(&cpu->scheduler, proc->context);
+          switchkvm();
+          //: Must only run when the state is not in the RUNNABLE state.
+          if (proc->state != RUNNABLE) break;
+      }
+      
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      proc = 0;
+      break;
+    }
+    release(&ptable.lock);
+    #endif
   }
 }
 
@@ -339,7 +394,8 @@ forkret(void)
     // of a regular process (e.g., they call sleep), and thus cannot 
     // be run from main().
     first = 0;
-    initlog();
+    iinit(ROOTDEV);
+    initlog(ROOTDEV);
   }
   
   // Return to "caller", actually trapret (see allocproc).
@@ -462,4 +518,56 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+// Implementation of wait_stat system call
+int wait_stat(int *wtime, int *rtime, int *iotime, int* status) {
+  struct proc *p;
+  int children, pid;
+    
+  acquire(&ptable.lock);
+  while(1){
+    // Look for zombie children
+    children = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->parent != proc) continue;
+      children = 1;
+      if(p->state == ZOMBIE){
+        pid = p->pid;
+        kfree(p->kstack);
+        p->kstack = 0;
+        freevm(p->pgdir);
+        p->state = UNUSED;
+        p->pid = 0;
+        p->parent = 0;
+        p->name[0] = 0;
+        p->killed = 0;
+        
+        *wtime = p->retime;
+        *rtime = p->rutime;
+        *iotime = p->stime;
+        *status = pid;
+        
+        release(&ptable.lock);
+        return pid;
+      }
+    }
+    if(!children || proc->killed){
+        release(&ptable.lock);
+        *status = -1;
+        return -1;
+    }
+    sleep(proc, &ptable.lock);
+  }
+}
+
+void tickIncrease(void) {
+    struct proc* p;
+    acquire(&ptable.lock);
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if(p->state == SLEEPING) (p->stime) = (p->stime)+1;
+        else if(p->state == RUNNABLE) (p->retime) = (p->retime)+1;
+        else if(p->state == RUNNING) (p->rutime) = (p->rutime)+1;
+    }
+    release(&ptable.lock);
 }

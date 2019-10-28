@@ -11,6 +11,7 @@
 // Interrupt descriptor table (shared by all CPUs).
 struct gatedesc idt[256];
 extern uint vectors[];  // in vectors.S: array of 256 entry pointers
+extern void tickIncrease(void);
 struct spinlock tickslock;
 uint ticks;
 
@@ -51,6 +52,7 @@ trap(struct trapframe *tf)
     if(cpu->id == 0){
       acquire(&tickslock);
       ticks++;
+      tickIncrease();
       wakeup(&ticks);
       release(&tickslock);
     }
@@ -100,12 +102,12 @@ trap(struct trapframe *tf)
   if(proc && proc->killed && (tf->cs&3) == DPL_USER)
     exit();
 
-  // Force process to give up CPU on clock tick.
-  // If interrupts were on while locks held, would need to check nlock.
-  if(proc && proc->state == RUNNING && tf->trapno == T_IRQ0+IRQ_TIMER)
+#ifdef FCFS
+    // Don't do anything
+#else
+  if(proc && proc->state == RUNNING && tf->trapno == T_IRQ0+IRQ_TIMER && (proc->ttime - proc->ctime) % QUANTA == 0)
     yield();
-
-  // Check if the process has been killed since we yielded
+#endif
   if(proc && proc->killed && (tf->cs&3) == DPL_USER)
     exit();
 }
